@@ -1,0 +1,110 @@
+name: Basemode design tokens
+description: Sync Figma variables and styles to code with a pull request. No code changes needed.
+branding:
+  icon: refresh-cw
+  color: blue
+
+inputs:
+  github-token:
+    description: Token used to push the branch and open the pull request
+    default: ${{ github.token }}
+  figma-token:
+    description: Figma personal access token. Reading variables this way needs Figma Enterprise.
+    required: false
+  figma-file-keys:
+    description: Comma-separated Figma file keys, used with figma-token
+    required: false
+  basemode-key:
+    description: A design system key from Basemode, instead of a Figma token. Works on every Figma plan with the plugin.
+    required: false
+  basemode-api:
+    description: Basemode's address, for a self-hosted install
+    default: https://api.basemode.dev
+  path:
+    description: Folder the tokens go in
+    default: src/tokens
+  formats:
+    description: "Comma-separated: css, scss, tailwind4, tailwind3, typescript, dtcg, storybook"
+    default: css
+  color:
+    description: "hex, rgb, hsl or oklch"
+    default: hex
+  unit:
+    description: "px, rem or em"
+    default: px
+  prefix:
+    description: Put in front of every token's name
+    default: ""
+  rename-references:
+    description: Update code that uses renamed tokens
+    default: "true"
+  base:
+    description: Branch to open the pull request against. Defaults to the repository's default branch.
+    default: ""
+  branch:
+    description: Branch the tokens are pushed to
+    default: basemode/tokens
+
+outputs:
+  pull-request:
+    description: Address of the pull request, when tokens changed
+    value: ${{ steps.publish.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Generate tokens
+      shell: bash
+      env:
+        FIGMA_TOKEN: ${{ inputs.figma-token }}
+        BASEMODE_KEY: ${{ inputs.basemode-key }}
+        BASEMODE_API: ${{ inputs.basemode-api }}
+        FILE_KEYS: ${{ inputs.figma-file-keys }}
+        FORMATS: ${{ inputs.formats }}
+        OUT: ${{ inputs.path }}
+        COLOR: ${{ inputs.color }}
+        UNIT: ${{ inputs.unit }}
+        PREFIX: ${{ inputs.prefix }}
+        RENAME: ${{ inputs.rename-references }}
+      run: |
+        args=(--out "$OUT" --color "$COLOR" --unit "$UNIT" --prefix "$PREFIX" --summary "$RUNNER_TEMP/summary.md")
+        IFS=',' read -ra chosen <<< "$FORMATS"
+        for format in "${chosen[@]}"; do args+=(--format "$(echo "$format" | xargs)"); done
+        if [ "$RENAME" = "true" ]; then args+=(--rename-references); fi
+        package="basemode-tokens==0.1.0"
+        if [ -n "$BASEMODE_KEY" ]; then
+          uvx --from "$package" basemode pull "${args[@]}"
+        else
+          uvx --from "$package" basemode generate --file "$FILE_KEYS" "${args[@]}"
+        fi
+
+    - name: Open a pull request
+      id: publish
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        BRANCH: ${{ inputs.branch }}
+        BASE: ${{ inputs.base }}
+      run: |
+        if [ -z "$(git status --porcelain)" ]; then
+          echo "Tokens are in sync."
+          exit 0
+        fi
+        base="${BASE:-$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)}"
+        title="$(head -n 1 "$RUNNER_TEMP/summary.md")"
+        tail -n +3 "$RUNNER_TEMP/summary.md" > "$RUNNER_TEMP/body.md"
+        git config user.name "basemode[bot]"
+        git config user.email "basemode[bot]@users.noreply.github.com"
+        git checkout -B "$BRANCH"
+        git add -A
+        git commit -m "$title"
+        git push --force origin "$BRANCH"
+        url="$(gh pr list --head "$BRANCH" --base "$base" --state open --json url --jq '.[0].url')"
+        if [ -n "$url" ]; then
+          gh pr edit "$url" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+        else
+          url="$(gh pr create --head "$BRANCH" --base "$base" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+        fi
+        echo "url=$url" >> "$GITHUB_OUTPUT"
