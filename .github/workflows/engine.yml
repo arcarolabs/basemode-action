@@ -1,0 +1,96 @@
+name: Follow engine releases
+
+on:
+  # Checks PyPI every hour, so a new engine reaches customers' workflows within the hour
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+# One bump at a time, in order
+concurrency:
+  group: engine
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# action.yml pins the basemode-tokens version it installs, so every customer's run gets the same
+# engine. When PyPI has a newer one, this runs the action's own command against it, and only if
+# that works bumps the pin on main and moves the v1 tag customers use. A version that fails stays
+# off main, and the run fails so someone looks. Every action is pinned to a commit.
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Commits the new pin and moves v1, with the token every run gets
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compare with PyPI
+        id: versions
+        run: |
+          current=$(grep -oP 'basemode-tokens==\K[^"]+' action.yml)
+          latest=$(curl -fsSL https://pypi.org/pypi/basemode-tokens/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          # Only ever forward: a release yanked or replaced on PyPI never pulls the pin back
+          newer=$(python3 - "$current" "$latest" <<'PY'
+          import re, sys
+          def key(version):
+              return [int(part) for part in re.findall(r"\d+", version)]
+          print("true" if key(sys.argv[2]) > key(sys.argv[1]) else "false")
+          PY
+          )
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "newer=$newer" >> "$GITHUB_OUTPUT"
+          echo "Pinned $current, PyPI has $latest." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install uv
+        if: steps.versions.outputs.newer == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+
+      # The same command and flags action.yml runs, on a small token file, so a release that
+      # changed the command line is caught here instead of in someone's workflow
+      - name: Try the new engine
+        if: steps.versions.outputs.newer == 'true'
+        env:
+          PACKAGE: basemode-tokens==${{ steps.versions.outputs.latest }}
+        run: |
+          dir="$RUNNER_TEMP/try"
+          mkdir -p "$dir"
+          cat > "$dir/tokens.json" <<'JSON'
+          {
+            "color": {
+              "brand": { "$type": "color", "$value": "#2563EB" },
+              "text": { "$type": "color", "$value": "{color.brand}" }
+            },
+            "space": { "4": { "$type": "dimension", "$value": "16px" } }
+          }
+          JSON
+          uvx --from "$PACKAGE" basemode generate --input "$dir/tokens.json" \
+            --out "$dir/out" --color hex --unit px --prefix "" --summary "$dir/summary.md" \
+            --format css --format tailwind4 --format typescript --rename-references
+          test -s "$dir/out/tokens.css"
+          test -s "$dir/summary.md"
+          uvx --from "$PACKAGE" basemode pull --help > /dev/null
+
+      - name: Bump the pin and move v1
+        if: steps.versions.outputs.newer == 'true'
+        env:
+          CURRENT: ${{ steps.versions.outputs.current }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          sed -i "s/basemode-tokens==$CURRENT/basemode-tokens==$LATEST/" action.yml
+          grep -q "basemode-tokens==$LATEST" action.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Use basemode-tokens $LATEST"
+          git push origin HEAD:main
+          # Customers use @v1, so it follows main: a new engine is a compatible update
+          git tag -f v1
+          git push -f origin v1
+          echo "Bumped to $LATEST and moved v1." >> "$GITHUB_STEP_SUMMARY"
