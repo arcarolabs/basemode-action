@@ -73,7 +73,7 @@ runs:
         IFS=',' read -ra chosen <<< "$FORMATS"
         for format in "${chosen[@]}"; do args+=(--format "$(echo "$format" | xargs)"); done
         if [ "$RENAME" = "true" ]; then args+=(--rename-references); fi
-        package="basemode-tokens==0.1.0"
+        package="basemode-tokens==0.2.0"
         if [ -n "$BASEMODE_KEY" ]; then
           uvx --from "$package" basemode pull "${args[@]}"
         else
